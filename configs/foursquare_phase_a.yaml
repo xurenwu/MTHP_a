@@ -1,0 +1,57 @@
+seed: 2026
+device: cuda
+output_dir: outputs/phase_a
+
+data:
+  train_file: data_mthp_hgcn/data_foursquare/tr_foursquare_10000.lst
+  test_file: data_mthp_hgcn/data_foursquare/te_foursquare_10000.lst
+  timestamp_unit: hour
+  max_history: 3
+  validation_items_per_user: 1
+  min_train_history: 1
+  item_id_mode: auto
+
+graph:
+  matrix_file: auto
+  degree_file: auto
+  matrix_is_normalized: false
+  add_self_loops: true
+  build_if_missing: true
+  cache_size: 20000
+
+model:
+  embedding_dim: 256
+  shcn_layers: 4
+  shcn_heads: 1
+  shcn_dropout: 0.1
+  graph_mix_coeff: 0.1
+  shcn_residual: false
+  user_fusion: add
+  similarity: cosine
+  granularities: [hour, day, week]
+  granularity_weights: learnable_global
+  decay_mode: shared_user
+  decay_init: 1.0
+  positive_intensity: false
+
+train:
+  epochs: 200
+  batch_size: 512
+  eval_batch_size: 128
+  learning_rate: 0.001
+  weight_decay: 0.01
+  negative_samples: 5
+  negative_power: 0.75
+  exclude_seen_negatives: false
+  num_workers: 0
+  patience: 20
+  monitor: recall@20
+  gradient_clip: 5.0
+  amp: true
+
+evaluation:
+  ks: [10, 20, 30]
+  full_ranking: true
+  item_chunk_size: 4096
+  mask_seen_items: false
+  evaluate_new_items: true
