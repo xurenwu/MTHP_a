@@ -15,16 +15,22 @@ from mthp.training import ExperimentRunner
 from mthp.utils import ensure_dir, resolve_device, save_json, set_seed, setup_logging
 
 
-
 def discover_graph_file(configured: str | None, train_file: str, patterns: list[str]) -> str | None:
-    if configured and configured != "auto" and Path(configured).exists():
-        return configured
+    if configured and configured != "auto":
+        return configured if Path(configured).exists() else configured
     train_dir = Path(train_file).resolve().parent
-    matches = []
+    matches: list[Path] = []
     for root in (train_dir, train_dir.parent):
         for pattern in patterns:
             matches.extend(sorted(root.glob(pattern)))
-    return str(matches[0]) if matches else (configured if configured != "auto" else None)
+    unique = sorted({p.resolve() for p in matches})
+    if len(unique) > 1:
+        raise RuntimeError(
+            "Automatic graph discovery is ambiguous. Set graph.matrix_file/degree_file explicitly: "
+            + ", ".join(str(p) for p in unique)
+        )
+    return str(unique[0]) if unique else None
+
 
 def matrix_shape(path: str | None) -> int | None:
     if not path or not Path(path).exists():
@@ -41,25 +47,35 @@ def matrix_shape(path: str | None) -> int | None:
 
 def prepare_graph(cfg: Dict[str, Any], corpus: InteractionCorpus) -> str:
     graph_cfg = cfg["graph"]
-    matrix_file = graph_cfg["matrix_file"]
-    if matrix_file and Path(matrix_file).exists():
-        return matrix_file
-    if not graph_cfg["build_if_missing"]:
+    matrix_file = graph_cfg.get("matrix_file")
+    rebuild = bool(graph_cfg.get("rebuild_from_train", False))
+    strict = bool(graph_cfg.get("strict_no_leakage", False))
+
+    internal_validation = (
+        not corpus.has_explicit_validation
+        and int(cfg["data"]["validation_items_per_user"]) > 0
+    )
+    if strict and internal_validation and not rebuild:
+        raise ValueError(
+            "strict_no_leakage=true with an internal validation split requires "
+            "graph.rebuild_from_train=true, because a prebuilt graph may contain validation edges"
+        )
+
+    if matrix_file and Path(matrix_file).exists() and not rebuild:
+        return str(matrix_file)
+    if not rebuild and not graph_cfg["build_if_missing"]:
         raise FileNotFoundError(f"Missing item matrix: {matrix_file}")
-    output = Path(matrix_file or cfg["output_dir"]) 
-    if output.suffix not in {".npz", ".npy"}:
-        output = output / "derived_item_matrix.npz"
-    elif output.suffix == ".npy":
-        output = output.with_suffix(".npz")
+
+    cache_root = ensure_dir(Path(cfg["output_dir"]) / Path(cfg["_config_path"]).stem / "graph_cache")
+    output = cache_root / "training_only_item_graph.npz"
     sequences = {
         user: [event.item for event in seq]
         for user, seq in corpus.train_core_by_user.items()
     }
-    logging.warning("Provided item matrix not found; building a training-only sparse cache at %s", output)
+    logging.warning("Building a training-only sparse item graph at %s", output)
     ItemGraphStore.build_from_user_sequences(sequences, corpus.num_items, output)
     graph_cfg["matrix_file"] = str(output)
-    if not graph_cfg.get("degree_file"):
-        graph_cfg["degree_file"] = str(output.with_name(output.stem + "_degree.npy"))
+    graph_cfg["degree_file"] = str(output.with_name(output.stem + "_graph_degree.npy"))
     return str(output)
 
 
@@ -73,17 +89,23 @@ def run(config_path: str, seed_override: int | None = None) -> Dict[str, Any]:
     setup_logging(run_dir)
 
     cfg["graph"]["matrix_file"] = discover_graph_file(
-        cfg["graph"].get("matrix_file"), cfg["data"]["train_file"],
+        cfg["graph"].get("matrix_file"),
+        cfg["data"]["train_file"],
         ["item_matrix.npy", "item_matrix_top*.npy", "item_matrix*.npz"],
     )
-    cfg["graph"]["degree_file"] = discover_graph_file(
-        cfg["graph"].get("degree_file"), cfg["data"]["train_file"],
-        ["in_degree.npy", "*degree*.npy"],
-    )
+    if cfg["graph"].get("degree_source") == "file":
+        cfg["graph"]["degree_file"] = discover_graph_file(
+            cfg["graph"].get("degree_file"),
+            cfg["data"]["train_file"],
+            ["*graph_degree*.npy", "*degree*.npy"],
+        )
+
     graph_items = matrix_shape(cfg["graph"]["matrix_file"])
     corpus = InteractionCorpus(
         train_file=cfg["data"]["train_file"],
+        valid_file=cfg["data"].get("valid_file"),
         test_file=cfg["data"]["test_file"],
+        test_new_file=cfg["data"].get("test_new_file"),
         matrix_num_items=graph_items,
         item_id_mode=cfg["data"]["item_id_mode"],
         validation_items_per_user=int(cfg["data"]["validation_items_per_user"]),
@@ -91,9 +113,10 @@ def run(config_path: str, seed_override: int | None = None) -> Dict[str, Any]:
     matrix_file = prepare_graph(cfg, corpus)
     graph = ItemGraphStore(
         matrix_file=matrix_file,
-        degree_file=cfg["graph"]["degree_file"],
+        degree_file=cfg["graph"].get("degree_file"),
         matrix_is_normalized=bool(cfg["graph"]["matrix_is_normalized"]),
-        add_self_loops=bool(cfg["graph"]["add_self_loops"]),
+        self_loop_mode=str(cfg["graph"]["self_loop_mode"]),
+        degree_source=str(cfg["graph"]["degree_source"]),
         cache_size=int(cfg["graph"]["cache_size"]),
     )
     if graph.num_items != corpus.num_items:
@@ -117,7 +140,11 @@ def run(config_path: str, seed_override: int | None = None) -> Dict[str, Any]:
     )
     valid_ds = SequenceDataset(corpus.validation_examples, **common)
     test_ds = SequenceDataset(corpus.test_examples(False), **common)
-    new_ds = SequenceDataset(corpus.test_examples(True), **common) if cfg["evaluation"]["evaluate_new_items"] else None
+    new_ds = (
+        SequenceDataset(corpus.new_test_examples(), **common)
+        if cfg["evaluation"]["evaluate_new_items"]
+        else None
+    )
 
     model = MTHPHC(
         num_users=corpus.num_users,
@@ -136,23 +163,26 @@ def run(config_path: str, seed_override: int | None = None) -> Dict[str, Any]:
         len(new_ds) if new_ds else 0,
         device,
     )
-    save_json(
-        {
-            "num_users": corpus.num_users,
-            "num_items": corpus.num_items,
-            "item_offset": corpus.item_offset,
-            "train_examples": len(train_ds),
-            "valid_examples": len(valid_ds),
-            "test_examples": len(test_ds),
-        },
-        run_dir / "dataset_summary.json",
-    )
+    summary = {
+        **corpus.split_statistics(),
+        "item_offset": corpus.item_offset,
+        "train_examples": len(train_ds),
+        "valid_examples": len(valid_ds),
+        "test_examples": len(test_ds),
+        "new_test_examples": len(new_ds) if new_ds else 0,
+        "matrix_file": matrix_file,
+        "degree_source": cfg["graph"]["degree_source"],
+        "self_loop_mode": cfg["graph"]["self_loop_mode"],
+    }
+    save_json(summary, run_dir / "dataset_summary.json")
+    save_json(cfg, run_dir / "resolved_config.json")
+
     runner = ExperimentRunner(cfg, model, graph, train_ds, valid_ds, test_ds, new_ds, device, run_dir)
     return runner.fit()
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Train the clean Phase-A MTHP-HC reproduction")
+    parser = argparse.ArgumentParser(description="Train MTHP-HC")
     parser.add_argument("--config", required=True)
     parser.add_argument("--seed", type=int, default=None)
     args = parser.parse_args()
