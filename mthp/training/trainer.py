@@ -1,19 +1,16 @@
 from __future__ import annotations
 
-import json
 import logging
 import time
-from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
 try:
     from tqdm.auto import tqdm
-except ImportError:  # pragma: no cover - fallback for minimal environments
+except ImportError:  # pragma: no cover
     class _TqdmFallback:
         def __init__(self, iterable=None, **kwargs):
             self._iterable = iterable if iterable is not None else range(0)
@@ -64,7 +61,9 @@ class ExperimentRunner:
             lr=float(train_cfg["learning_rate"]),
             weight_decay=float(train_cfg["weight_decay"]),
         )
-        self.scaler = torch.amp.GradScaler("cuda", enabled=bool(train_cfg["amp"]) and device.type == "cuda")
+        self.scaler = torch.amp.GradScaler(
+            "cuda", enabled=bool(train_cfg["amp"]) and device.type == "cuda"
+        )
 
     def _loader(self, dataset: SequenceDataset, train: bool) -> DataLoader:
         batch_size = self.cfg["train"]["batch_size" if train else "eval_batch_size"]
@@ -92,14 +91,8 @@ class ExperimentRunner:
         count = 0
         amp_enabled = bool(self.cfg["train"]["amp"]) and self.device.type == "cuda"
         loader = self._loader(self.train_dataset, train=True)
-        progress = tqdm(
-            loader,
-            total=len(loader),
-            desc="train",
-            leave=False,
-            dynamic_ncols=True,
-        )
-        for step, raw in enumerate(progress, start=1):
+        progress = tqdm(loader, total=len(loader), desc="train", leave=False, dynamic_ncols=True)
+        for raw in progress:
             batch = self._move(raw)
             self.optimizer.zero_grad(set_to_none=True)
             with torch.autocast(device_type=self.device.type, enabled=amp_enabled):
@@ -129,6 +122,10 @@ class ExperimentRunner:
 
     @torch.no_grad()
     def evaluate(self, dataset: SequenceDataset) -> Dict[str, float]:
+        if not bool(self.cfg["evaluation"]["full_ranking"]):
+            raise NotImplementedError(
+                "Only full-ranking evaluation is implemented; set evaluation.full_ranking=true"
+            )
         self.model.eval()
         ranks: List[int] = []
         item_chunk = int(self.cfg["evaluation"]["item_chunk_size"])
@@ -171,6 +168,7 @@ class ExperimentRunner:
         train_cfg = self.cfg["train"]
         monitor = str(train_cfg["monitor"])
         patience = int(train_cfg["patience"])
+        checkpoint_policy = str(train_cfg["checkpoint_policy"])
         best_value = -float("inf")
         best_epoch = -1
         stale = 0
@@ -180,20 +178,23 @@ class ExperimentRunner:
 
         logging.info("Starting training for %d epochs", epochs)
         epoch_progress = tqdm(range(1, epochs + 1), desc="epoch", dynamic_ncols=True)
-
         for epoch in epoch_progress:
             started = time.time()
-            logging.info("Epoch %d/%d started", epoch, epochs)
             loss = self.train_epoch()
-            logging.info("Epoch %d/%d finished training, running validation", epoch, epochs)
             valid = self.evaluate(self.valid_dataset) if len(self.valid_dataset) else {}
             value = valid.get(monitor, -loss)
             record = {"epoch": epoch, "loss": loss, "seconds": time.time() - started, **valid}
             history.append(record)
-            log_message = f"epoch={epoch} loss={loss:.6f} valid={valid}"
-            logging.info(log_message)
-            epoch_progress.set_postfix(loss=f"{loss:.4f}", best=f"{best_value:.4f}", monitor=f"{value:.4f}")
-            if value > best_value:
+            logging.info("epoch=%d loss=%.6f valid=%s", epoch, loss, valid)
+
+            if checkpoint_policy == "last":
+                best_epoch = epoch
+                best_value = value
+                torch.save(
+                    {"model": self.model.state_dict(), "epoch": epoch, "config": self.cfg},
+                    checkpoint,
+                )
+            elif value > best_value:
                 best_value = value
                 best_epoch = epoch
                 stale = 0
@@ -206,17 +207,22 @@ class ExperimentRunner:
                 if patience > 0 and stale >= patience:
                     logging.info("Early stopping at epoch %d", epoch)
                     break
+            epoch_progress.set_postfix(loss=f"{loss:.4f}", best=f"{best_value:.4f}")
 
         epoch_progress.close()
-
         if checkpoint.exists():
             state = torch.load(checkpoint, map_location=self.device, weights_only=False)
             self.model.load_state_dict(state["model"])
         test = self.evaluate(self.test_dataset)
-        new_test = self.evaluate(self.new_test_dataset) if self.new_test_dataset and len(self.new_test_dataset) else None
+        new_test = (
+            self.evaluate(self.new_test_dataset)
+            if self.new_test_dataset is not None and len(self.new_test_dataset)
+            else None
+        )
         result = {
             "best_epoch": best_epoch,
             "best_validation": best_value,
+            "checkpoint_policy": checkpoint_policy,
             "test": test,
             "new_item_test": new_test,
             "history": history,
