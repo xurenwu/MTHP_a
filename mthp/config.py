@@ -13,6 +13,7 @@ DEFAULTS: Dict[str, Any] = {
     "output_dir": "outputs/phase_a",
     "data": {
         "train_file": None,
+        "valid_file": None,
         "test_file": None,
         "test_new_file": None,
         "timestamp_unit": "hour",
@@ -25,24 +26,29 @@ DEFAULTS: Dict[str, Any] = {
         "matrix_file": None,
         "degree_file": None,
         "matrix_is_normalized": False,
-        "add_self_loops": True,
-        "degree_source": "file_or_matrix",
+        "self_loop_mode": "auto",
+        "degree_source": "local",
         "build_if_missing": True,
+        "rebuild_from_train": False,
+        "strict_no_leakage": False,
         "cache_size": 20000,
     },
     "model": {
         "embedding_dim": 256,
-        "shcn_layers": 4,
+        "shcn_layers": 1,
         "shcn_heads": 1,
         "shcn_dropout": 0.1,
         "graph_mix_coeff": 0.1,
         "shcn_residual": False,
-        "user_fusion": "add",
+        "shcn_output_projection": False,
+        "user_fusion": "structural_only",
         "similarity": "cosine",
         "granularities": ["hour", "day", "week"],
         "granularity_weights": "learnable_global",
+        "granularity_hidden_dim": 256,
         "decay_mode": "shared_user",
         "decay_init": 1.0,
+        "decay_parameterization": "softplus",
         "positive_intensity": False,
     },
     "train": {
@@ -57,6 +63,7 @@ DEFAULTS: Dict[str, Any] = {
         "num_workers": 0,
         "patience": 20,
         "monitor": "recall@20",
+        "checkpoint_policy": "best",
         "gradient_clip": 5.0,
         "amp": False,
     },
@@ -80,10 +87,20 @@ def _merge(base: Dict[str, Any], update: Dict[str, Any]) -> Dict[str, Any]:
     return result
 
 
+def _normalize_legacy_options(cfg: Dict[str, Any], raw: Dict[str, Any]) -> None:
+    graph_raw = raw.get("graph", {}) if isinstance(raw.get("graph", {}), dict) else {}
+    if "add_self_loops" in graph_raw and "self_loop_mode" not in graph_raw:
+        cfg["graph"]["self_loop_mode"] = "add" if graph_raw["add_self_loops"] else "none"
+    policy = str(cfg["train"]["checkpoint_policy"])
+    if policy not in {"best", "last"}:
+        raise ValueError("checkpoint_policy must be best or last")
+
+
 def load_config(path: str | Path) -> Dict[str, Any]:
     path = Path(path)
     with path.open("r", encoding="utf-8") as f:
         raw = yaml.safe_load(f) or {}
     cfg = _merge(DEFAULTS, raw)
+    _normalize_legacy_options(cfg, raw)
     cfg["_config_path"] = str(path.resolve())
     return cfg
