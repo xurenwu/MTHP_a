@@ -1,97 +1,126 @@
-# MTHP-HC Phase A: clean paper reproduction
+# MTHP-HC reproduction and ASOC extension
 
-This directory set is a complete, unified reimplementation of the paper model rather than a patch of the legacy `HTSER_a` code. It keeps the supplied `.lst`, `in_degree.npy`, and `item_matrix*.npy` files unchanged and uses them through a memory-safe graph interface.
+This repository contains two deliberately separated experiment paths:
 
-## What is implemented
+1. **Reproduction path**: follows the equations and stated hyperparameters of the paper as closely as the supplied files allow.
+2. **ASOC path**: uses leakage-safe validation graphs and mathematically valid positive temporal intensities for the journal extension.
 
-1. Separate user and item ID embeddings.
-2. User-item hypergraph-induced item graph supplied by `item_matrix*.npy`.
-3. User-specific matrix slicing for every history sequence.
-4. Symmetric degree normalization using the supplied `in_degree.npy` when available.
-5. Four-layer SHCN by default, based on the layer count in the legacy code.
-6. Structural diffusion with the paper relation term `A_hat + delta * Norm(QK^T/sqrt(d))`.
-7. Mean pooling and normalized fusion with the personalized user embedding.
-8. Hour/day/week Hawkes branches.
-9. Learnable global multi-granularity weights.
-10. User-specific temporal decay.
-11. Paper-faithful cosine base/excitation scores and BPR pairwise loss.
-12. Full-item ranking with Recall, MRR, and NDCG.
-13. Normal next-item and user-unseen next-item evaluation.
-14. Validation-based early stopping, checkpoints, deterministic seeds, and five-seed execution.
+The repository data split does not exactly match every statistic reported in the paper. Results obtained from the supplied files must therefore be described as repository-split results rather than an exact reproduction of the published tables.
 
-## Configuration provenance
+## Fixed implementation issues
 
-| Setting | Value | Source |
-|---|---:|---|
-| embedding dimension | 256 | paper and legacy config |
-| negative samples | 5 | paper and legacy config |
-| history length | 3 | paper and legacy config |
-| learning rate | 1e-3 | paper and legacy config |
-| epochs | 200 | paper and legacy config |
-| batch size | 512 | paper |
-| weight decay | 0.01 | paper |
-| SHCN layers | 4 | legacy `Model_new_user_attention3.py` |
-| SHCN heads | 1 | legacy code |
-| graph relation coefficient | 0.1 | legacy `hGCN.py` |
-| SHCN dropout | 0.1 | legacy layer definition |
+The current implementation fixes the following problems:
 
-Paper-unspecified settings are explicit YAML options and are never hidden in source code.
+- explicit `train`, `valid`, `test`, and `test_new` split support;
+- test histories are seeded with all preceding train/validation events;
+- the supplied new-item split is no longer ignored;
+- ambiguous automatic graph-file selection now raises an error;
+- validation leakage is blocked when `strict_no_leakage: true`;
+- training-only sparse graphs can be rebuilt deterministically;
+- graph degree, item popularity, and local subgraph degree are no longer conflated;
+- self-loops use `auto`, `add`, or `none`, avoiding accidental double self-loops;
+- SHCN follows `V=ELU(XW)` before structural propagation;
+- the undocumented extra SHCN output projection is disabled by default;
+- structural-only user representations fall back to the user embedding for empty histories;
+- positive decay can use a differentiable Softplus parameterization;
+- user-granularity decay and user-adaptive granularity weights are supported;
+- reproduction runs can save the final epoch while validation runs save the best epoch;
+- `full_ranking: false` no longer silently behaves as full ranking;
+- data auditing reports matrix diagonals and verifies supplied degree vectors.
 
-## Dataset paths
+## Dataset mapping
 
-The supplied layout is expected:
+The supplied Last.fm-derived files are mapped as follows:
+
+- `top10000` -> repository LastFM-10K split;
+- `top30000` -> repository 30Music-30K split;
+- `foursquare_10000` -> repository Foursquare legacy split.
+
+Before citing paper-scale dataset statistics, run the data audit and compare the actual counts with the manuscript.
+
+## Reproduction configuration
+
+The main reproduction files are:
 
 ```text
-data_mthp_hgcn/
-  data_lastfm/
-  data_foursquare/
-  data_ml_1m/
+configs/lastfm_phase_a.yaml
+configs/30music_phase_a.yaml
+configs/foursquare_phase_a.yaml
 ```
 
-Update only the file paths in `configs/*.yaml` when the matrix or degree filenames differ. Dense `.npy` matrices are memory-mapped and are not fully loaded into RAM. Sparse `.npz` matrices are also supported.
+They use:
 
-When a graph file is absent and `build_if_missing: true`, a training-only sparse item graph is generated as a cache; the original `.lst` files are not modified.
+- history length 3;
+- cosine base and excitation scores;
+- shared user decay;
+- global learnable hour/day/week weights;
+- signed ranking scores (`positive_intensity: false`);
+- one SHCN layer following the restored paper equation;
+- no internal validation holdout;
+- final-epoch checkpointing;
+- full-item ranking;
+- no seen-item masking.
 
-## Run
+Run:
 
 ```bash
 pip install -r requirements-phase-a.txt
+python scripts/check_data.py --config configs/lastfm_phase_a.yaml --compare-degree
 python train_phase_a.py --config configs/lastfm_phase_a.yaml --seed 2026
 ```
 
-Run all three datasets and five seeds:
+Run three repository datasets with five seeds:
 
 ```bash
 bash scripts/run_phase_a.sh
 ```
 
-## Reproduction boundary
+## ASOC configuration
 
-Phase A reproduces the method stated in the paper. It intentionally does **not** add the Phase-B corrections such as Softplus non-negative intensities, user-granularity-specific decay, reliability-aware graph edges, or a temporal point-process likelihood. `positive_intensity` is disabled in all Phase-A configurations.
+`configs/asoc/lastfm_10k.yaml` demonstrates the leakage-safe journal path:
 
-The legacy repository used a signed ranking score while calling it a Hawkes intensity. Phase A preserves that behavior for controlled reproduction, but the code names and documentation distinguish the score from a mathematically valid non-negative point-process intensity.
+- an internal validation split is created;
+- the item graph is rebuilt from training-only interactions;
+- positive Softplus intensity is enabled;
+- decay is user- and granularity-specific;
+- temporal granularity weights are user-adaptive;
+- residual SHCN propagation and early stopping are enabled.
 
-## Important protocol choices
+These choices are an extension of the paper model and must not be reported as the original reproduction result.
 
-- The provided train and test interactions remain unchanged.
-- One final interaction per user is taken from the provided training file for validation. Set `validation_items_per_user: 0` to disable this.
-- Test histories are seeded with the complete provided training history, then updated chronologically with preceding test events.
-- Full ranking is used.
-- Seen items are not masked by default, matching repeat-aware music recommendation. Set `mask_seen_items: true` for conventional non-repeat evaluation.
-- The user-unseen task means an item not previously consumed by that user; it is not global cold start.
+## Graph handling
 
-## Data audit and result aggregation
+Dense `.npy` matrices are memory-mapped. Sparse `.npz` matrices are supported directly. Only the local `L x L` history graph is transferred to the accelerator.
 
-Before training, verify IDs, matrix dimensions, and degree dimensions:
+Graph options:
 
-```bash
-python scripts/check_data.py --config configs/lastfm_phase_a.yaml
+```yaml
+graph:
+  self_loop_mode: auto   # auto, add, none
+  degree_source: local   # local, file, matrix
 ```
 
-After five seeds:
+Use `degree_source: file` only with a verified item-item graph degree vector. Do not use an interaction-popularity vector as graph degree.
 
-```bash
-python scripts/aggregate_results.py outputs/phase_a/lastfm_phase_a
+For a clean validation protocol:
+
+```yaml
+graph:
+  rebuild_from_train: true
+  strict_no_leakage: true
 ```
 
-For machines that cannot handle the 30,000-item experiment immediately, `configs/lastfm_top10000_phase_a.yaml` uses the supplied top-10,000 split and matrix. This is a debugging configuration, not a replacement for the paper-scale LastFM result.
+## Evaluation tasks
+
+- Normal next-item evaluation uses the configured `test_file`.
+- User-unseen next-item evaluation uses `test_new_file` when provided.
+- User-unseen means unseen by that user before prediction; it is not global item cold start.
+- Full ranking is the only implemented evaluation mode.
+
+## Tests
+
+```bash
+pytest -q
+```
+
+The tests cover ID alignment, explicit split handling, test-history seeding, graph self-loops, SHCN gradients, positive decay, adaptive granularity weights, and empty-history fallback.

@@ -1,6 +1,6 @@
 seed: 2026
 device: cuda
-output_dir: outputs/reproduction
+output_dir: outputs/asoc
 
 data:
   train_file: data_mthp_hgcn/data_lastfm/tr-user-item-time-top10000-min100-max1000-hour.lst
@@ -8,9 +8,9 @@ data:
   test_file: data_mthp_hgcn/data_lastfm/te-user-old-item-time-top10000-min100-max1000-hour.lst
   test_new_file: data_mthp_hgcn/data_lastfm/te-user-new-item-time-top10000-min100-max1000-hour.lst
   timestamp_unit: hour
-  max_history: 3
-  validation_items_per_user: 0
-  min_train_history: 0
+  max_history: 20
+  validation_items_per_user: 1
+  min_train_history: 1
   item_id_mode: auto
 
 graph:
@@ -19,42 +19,43 @@ graph:
   matrix_is_normalized: false
   self_loop_mode: auto
   degree_source: local
-  build_if_missing: false
-  rebuild_from_train: false
-  strict_no_leakage: false
-  cache_size: 20000
+  build_if_missing: true
+  rebuild_from_train: true
+  strict_no_leakage: true
+  cache_size: 50000
 
 model:
   embedding_dim: 256
-  shcn_layers: 1
+  shcn_layers: 2
   shcn_heads: 1
   shcn_dropout: 0.1
   graph_mix_coeff: 0.1
-  shcn_residual: false
+  shcn_residual: true
   shcn_output_projection: false
-  user_fusion: structural_only
+  user_fusion: add
   similarity: cosine
   granularities: [hour, day, week]
-  granularity_weights: learnable_global
-  decay_mode: shared_user
-  decay_init: 1.0
-  decay_parameterization: clamp
-  positive_intensity: false
+  granularity_weights: user_adaptive
+  granularity_hidden_dim: 128
+  decay_mode: user_granularity
+  decay_init: 0.1
+  decay_parameterization: softplus
+  positive_intensity: true
 
 train:
   epochs: 200
-  batch_size: 512
+  batch_size: 256
   eval_batch_size: 128
   learning_rate: 0.001
-  weight_decay: 0.01
+  weight_decay: 0.001
   negative_samples: 5
   negative_power: 0.75
   exclude_seen_negatives: false
   num_workers: 0
-  patience: 0
+  patience: 20
   monitor: recall@20
-  checkpoint_policy: last
-  gradient_clip: 0.0
+  checkpoint_policy: best
+  gradient_clip: 5.0
   amp: false
 
 evaluation:

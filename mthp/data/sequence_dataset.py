@@ -31,6 +31,9 @@ class NegativeSampler:
         forbidden = {target}
         if self.exclude_seen:
             forbidden.update(seen)
+        available = [item for item in self.candidates.tolist() if item not in forbidden]
+        if not available:
+            raise ValueError("No valid negative item remains after applying exclusions")
         result: List[int] = []
         while len(result) < size:
             draw = self.rng.choice(self.candidates, size=max(size * 2, 16), p=self.probabilities)
@@ -51,6 +54,8 @@ class SequenceDataset(Dataset):
         negative_sampler: NegativeSampler | None = None,
         negative_samples: int = 0,
     ) -> None:
+        if max_history <= 0:
+            raise ValueError("max_history must be positive")
         self.examples = list(examples)
         self.max_history = max_history
         self.pad_item_id = pad_item_id
@@ -91,6 +96,8 @@ class SequenceDataset(Dataset):
 
 
 def collate_sequence_batch(rows: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+    if not rows:
+        raise ValueError("Cannot collate an empty batch")
     tensor_keys = [
         "user",
         "target_item",

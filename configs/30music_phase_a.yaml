@@ -3,10 +3,10 @@ device: cuda
 output_dir: outputs/reproduction
 
 data:
-  train_file: data_mthp_hgcn/data_foursquare/tr_foursquare_10000.lst
+  train_file: data_mthp_hgcn/data_lastfm/tr-user-item-time-top30000-min100-max1000-hour.lst
   valid_file: null
-  test_file: data_mthp_hgcn/data_foursquare/te_foursquare_10000.lst
-  test_new_file: null
+  test_file: data_mthp_hgcn/data_lastfm/te-user-old-item-time-top30000-min100-max1000-hour.lst
+  test_new_file: data_mthp_hgcn/data_lastfm/te-user-new-item-time-top30000-min100-max1000-hour.lst
   timestamp_unit: hour
   max_history: 3
   validation_items_per_user: 0
@@ -14,12 +14,12 @@ data:
   item_id_mode: auto
 
 graph:
-  matrix_file: auto
+  matrix_file: data_mthp_hgcn/data_lastfm/item_matrix.npy
   degree_file: null
   matrix_is_normalized: false
   self_loop_mode: auto
   degree_source: local
-  build_if_missing: true
+  build_if_missing: false
   rebuild_from_train: false
   strict_no_leakage: false
   cache_size: 20000
@@ -44,7 +44,7 @@ model:
 train:
   epochs: 200
   batch_size: 512
-  eval_batch_size: 128
+  eval_batch_size: 64
   learning_rate: 0.001
   weight_decay: 0.01
   negative_samples: 5
@@ -60,6 +60,6 @@ train:
 evaluation:
   ks: [10, 20, 30]
   full_ranking: true
-  item_chunk_size: 4096
+  item_chunk_size: 2048
   mask_seen_items: false
-  evaluate_new_items: false
+  evaluate_new_items: true
